@@ -21,13 +21,17 @@
 
 ## 在新电脑上安装
 
-### 前提条件
-- 已安装 **Google Antigravity** 桌面客户端
-- 启动 Antigravity 时带有调试端口参数：`--remote-debugging-port=0`
-  - **Windows 快捷方式**：右键 Antigravity 快捷方式 → 属性 → 在“目标”末尾加上 ` --remote-debugging-port=0`
-  - **Ghost Proxifier 内部启动**：在 Antigravity 项的启动参数（`args`）中填入 `--remote-debugging-port=0`
+### 方式一：AI 一键安装 Prompt（推荐）
 
-### 方式一：Git 一键安装（推荐，方便后续更新）
+直接打开 **Antigravity**（或 **Codex** 对话框），复制下面这段话发给 AI 即可自动完成下载、安装和调试参数配置：
+
+```text
+请帮我从 https://github.com/<你的用户名>/sidebar-status-pin.git 安装 sidebar-status-pin 插件到全局目录，并帮我检查/配置好 Antigravity 的 --remote-debugging-port=0 启动参数。
+```
+
+> 安装完成后，**完全退出并重新打开 Antigravity**，在 **Plugins / Customizations** 面板确认启用 **Sidebar Status Pin** 即可。
+
+### 方式二：Git 手动安装（方便后续 `git pull` 更新）
 
 在终端中直接克隆到 Antigravity 全局插件目录：
 
@@ -41,10 +45,11 @@ git clone https://github.com/<你的用户名>/sidebar-status-pin.git "$env:USER
 git clone https://github.com/<你的用户名>/sidebar-status-pin.git ~/.gemini/config/plugins/sidebar-status-pin
 ```
 
-### 方式二：网页直接下载 ZIP 安装（无需 Git）
+### 方式三：网页直接下载 ZIP 安装（无需 Git）
 
 1. 在本仓库页面右上角点击 **Code → Download ZIP** 并解压。
-2. 运行对应系统的安装脚本：
+2. 确保 Antigravity 启动参数包含 `--remote-debugging-port=0`（Windows 可右键快捷方式 → 属性 → 目标末尾加 ` --remote-debugging-port=0`；使用 Ghost Proxifier 则在其 `args` 中填入 `--remote-debugging-port=0`）。
+3. 运行对应系统的安装脚本：
    - **Windows**：双击运行 `install.bat`
    - **macOS / Linux**：在解压目录打开终端执行：
      ```bash
