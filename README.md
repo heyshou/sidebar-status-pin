@@ -1,5 +1,7 @@
 # Sidebar Status Pin (`sidebar-status-pin`)
 
+**中文** | [English](./README.en.md)
+
 为 **Google Antigravity** 原生左侧边栏提供**单条对话着色高亮、呼吸灯动效与项目内状态置顶**的轻量级全局 Sidecar 插件。
 
 ## 核心效果
@@ -26,23 +28,21 @@
 直接打开 **Antigravity**（或 **Codex** 对话框），复制下面这段话发给 AI 即可自动完成下载、安装和调试参数配置：
 
 ```text
-请帮我从 https://github.com/<你的用户名>/sidebar-status-pin.git 安装 sidebar-status-pin 插件到全局目录，并帮我检查/配置好 Antigravity 的 --remote-debugging-port=0 启动参数。
+请帮我从 https://github.com/heyshou/sidebar-status-pin.git 安装 sidebar-status-pin 插件到全局目录，并帮我检查/配置好 Antigravity 的 --remote-debugging-port=0 启动参数。
 ```
 
 > 安装完成后，**完全退出并重新打开 Antigravity**，在 **Plugins / Customizations** 面板确认启用 **Sidebar Status Pin** 即可。
 
 ### 方式二：Git 手动安装（方便后续 `git pull` 更新）
 
-在终端中直接克隆到 Antigravity 全局插件目录：
-
 **Windows (PowerShell)：**
 ```powershell
-git clone https://github.com/<你的用户名>/sidebar-status-pin.git "$env:USERPROFILE\.gemini\config\plugins\sidebar-status-pin"
+git clone https://github.com/heyshou/sidebar-status-pin.git "$env:USERPROFILE\.gemini\config\plugins\sidebar-status-pin"
 ```
 
 **macOS / Linux：**
 ```bash
-git clone https://github.com/<你的用户名>/sidebar-status-pin.git ~/.gemini/config/plugins/sidebar-status-pin
+git clone https://github.com/heyshou/sidebar-status-pin.git ~/.gemini/config/plugins/sidebar-status-pin
 ```
 
 ### 方式三：网页直接下载 ZIP 安装（无需 Git）
@@ -55,7 +55,7 @@ git clone https://github.com/<你的用户名>/sidebar-status-pin.git ~/.gemini/
      ```bash
      chmod +x install.sh && ./install.sh
      ```
-3. 完全退出并重新打开 Antigravity（确保带 `--remote-debugging-port=0` 启动），在 **Plugins / Customizations** 面板中确认 **Sidebar Status Pin** 已启用即可生效。
+4. 完全退出并重新打开 Antigravity（确保带 `--remote-debugging-port=0` 启动），在 **Plugins / Customizations** 面板中确认 **Sidebar Status Pin** 已启用即可生效。
 
 ---
 
@@ -81,7 +81,8 @@ sidebar-status-pin/
 ├── install.bat / install.ps1          # Windows 一键安装脚本
 ├── install.sh                         # macOS / Linux 一键安装脚本
 ├── uninstall.bat                      # Windows 卸载脚本
-└── README.md
+├── README.md                          # 中文说明文档
+└── README.en.md                       # English documentation
 ```
 
 ## License
