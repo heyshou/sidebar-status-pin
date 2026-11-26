@@ -1,0 +1,6 @@
+{
+  "name": "sidebar-status-pin",
+  "displayName": "Sidebar Status Pin",
+  "version": "1.0.0",
+  "description": "Highlights Antigravity sidebar conversations (done/waiting/running) with colored bars & breathing lights and pins them at the top in priority order."
+}

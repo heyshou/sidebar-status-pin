@@ -1,0 +1,10 @@
+{
+  "command": "node",
+  "args": [
+    "main.mjs"
+  ],
+  "description": "Highlights sidebar conversations by status and pins done/waiting/running conversations to the top.",
+  "display_name": "Sidebar Status Pin",
+  "has_web_ui": false,
+  "restart_policy": "always"
+}
