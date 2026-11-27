@@ -31,6 +31,9 @@ function getDevToolsPort() {
   return null;
 }
 
+const lastKnownWaiting = new Map();
+const waitingMissCount = new Map();
+
 async function isConversationWaiting(cascadeId, stepCount) {
   try {
     const start = Math.max(0, (Number(stepCount) || 0) - 8);
@@ -46,7 +49,7 @@ async function isConversationWaiting(cascadeId, stepCount) {
         signal: AbortSignal.timeout(3000),
       }
     );
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const data = await res.json();
     const steps = Array.isArray(data?.steps) ? data.steps : [];
     const tail = steps.slice(-8);
@@ -61,8 +64,10 @@ async function isConversationWaiting(cascadeId, stepCount) {
         return true;
       }
     }
-  } catch {}
-  return false;
+    return false;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchTrajectories() {
@@ -81,6 +86,14 @@ async function fetchTrajectories() {
   if (!res.ok) throw new Error(`LS HTTP ${res.status}`);
   const data = await res.json();
   const summaries = data?.trajectorySummaries || {};
+  const seenIds = new Set(Object.keys(summaries));
+  for (const id of Array.from(lastKnownWaiting.keys())) {
+    if (!seenIds.has(id)) lastKnownWaiting.delete(id);
+  }
+  for (const id of Array.from(waitingMissCount.keys())) {
+    if (!seenIds.has(id)) waitingMissCount.delete(id);
+  }
+
   const items = [];
   const runningChecks = [];
   for (const [id, info] of Object.entries(summaries)) {
@@ -88,8 +101,13 @@ async function fetchTrajectories() {
     let status = 'idle';
     if (rawStatus.includes('WAITING')) {
       status = 'waiting';
+      lastKnownWaiting.set(id, true);
+      waitingMissCount.set(id, 0);
     } else if (rawStatus === 'CASCADE_RUN_STATUS_RUNNING') {
       status = 'running';
+    } else {
+      lastKnownWaiting.delete(id);
+      waitingMissCount.delete(id);
     }
     const entry = {
       id,
@@ -101,7 +119,24 @@ async function fetchTrajectories() {
     if (status === 'running') {
       runningChecks.push(
         isConversationWaiting(id, info?.stepCount).then((waiting) => {
-          if (waiting) entry.status = 'waiting';
+          if (waiting === true) {
+            entry.status = 'waiting';
+            lastKnownWaiting.set(id, true);
+            waitingMissCount.set(id, 0);
+          } else if (waiting === null) {
+            if (lastKnownWaiting.get(id) === true) {
+              entry.status = 'waiting';
+            }
+          } else if (lastKnownWaiting.get(id) === true) {
+            const misses = (waitingMissCount.get(id) || 0) + 1;
+            if (misses >= 2) {
+              lastKnownWaiting.set(id, false);
+              waitingMissCount.delete(id);
+            } else {
+              waitingMissCount.set(id, misses);
+              entry.status = 'waiting';
+            }
+          }
         })
       );
     }
@@ -112,18 +147,36 @@ async function fetchTrajectories() {
   return items;
 }
 
-// Page-side bootstrap script (v6: require clicking title + clicking chat box to clear done; persist in localStorage)
+// Page-side bootstrap script (v7: CSS translate offset + hover freeze + active indicator + composer focus clear)
 const BOOTSTRAP_SCRIPT = `(() => {
-  const VERSION = 6;
+  const VERSION = 7;
   if (window.__agySidebarPin && window.__agySidebarPin.version === VERSION) return true;
 
-  // Clean up any v1 global dock or old style
+  // Clean up any v1 global dock, old style, and v6 inline transform mutations
   const oldDock = document.getElementById('agy-sidebar-pin-dock');
   if (oldDock) oldDock.remove();
   const oldStyle = document.getElementById('agy-sidebar-pin-style');
   if (oldStyle) oldStyle.remove();
   if (window.__agySidebarPin?.cleanup) {
     try { window.__agySidebarPin.cleanup(); } catch {}
+  }
+
+  const prevList = document.querySelector('[data-testid="conversation-list-sidebar"]');
+  const prevInner = prevList?.firstElementChild;
+  if (prevInner) {
+    for (const wrapper of Array.from(prevInner.children)) {
+      if (wrapper.dataset?.agyOrigY !== undefined) {
+        wrapper.style.transform = 'translateY(' + wrapper.dataset.agyOrigY + 'px)';
+        delete wrapper.dataset.agyOrigY;
+      }
+      if (wrapper.dataset?.agyAppliedY !== undefined) {
+        delete wrapper.dataset.agyAppliedY;
+      }
+      if (wrapper.dataset?.agyManaged !== undefined) {
+        delete wrapper.dataset.agyManaged;
+      }
+      wrapper.style.removeProperty('--agy-dy');
+    }
   }
 
   const STYLE_ID = 'agy-sidebar-pin-style';
@@ -143,16 +196,17 @@ const BOOTSTRAP_SCRIPT = `(() => {
         50% { opacity: 1; box-shadow: 0 0 10px rgba(245, 158, 11, 0.85); }
       }
 
-      /* Smooth vertical glide when rows reorder within their project */
+      /* Smooth vertical glide using independent CSS translate so React style.transform stays untouched */
       [data-testid="conversation-list-sidebar"] > div > div[data-agy-managed="1"] {
-        transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+        translate: 0 var(--agy-dy, 0px);
+        transition: translate 180ms cubic-bezier(0.22, 1, 0.36, 1);
       }
 
       /* Native sidebar conversation row enhancements */
       [data-testid="conversation-row-sidebar"][data-agy-sb-state] {
         position: relative !important;
         overflow: hidden !important;
-        transition: background-color 180ms ease;
+        transition: background-color 180ms ease, box-shadow 180ms ease;
       }
       [data-testid="conversation-row-sidebar"][data-agy-sb-state]::before {
         content: "";
@@ -183,18 +237,28 @@ const BOOTSTRAP_SCRIPT = `(() => {
         opacity: 0;
       }
 
-      /* 1. Done (Unread) - Green */
+      /* 1. Done (Unread) - Soft Green when inactive, vivid ring + badge when active */
       [data-testid="conversation-row-sidebar"][data-agy-sb-state="done"] {
-        background-color: rgba(34, 197, 94, 0.14) !important;
+        background-color: rgba(34, 197, 94, 0.10) !important;
       }
       [data-testid="conversation-row-sidebar"][data-agy-sb-state="done"]::before {
         background: #22c55e;
-        box-shadow: 0 0 8px rgba(34, 197, 94, 0.7);
+        box-shadow: 0 0 8px rgba(34, 197, 94, 0.65);
       }
       [data-testid="conversation-row-sidebar"][data-agy-sb-state="done"]::after {
         content: "完成";
         color: #4ade80;
         background: rgba(20, 83, 45, 0.72);
+      }
+      [data-testid="conversation-row-sidebar"][data-agy-sb-state="done"][data-agy-sb-active="1"] {
+        background-color: rgba(34, 197, 94, 0.25) !important;
+        box-shadow: inset 0 0 0 1.5px rgba(134, 239, 172, 0.92), inset 4px 0 0 0 #4ade80 !important;
+        font-weight: 600 !important;
+      }
+      [data-testid="conversation-row-sidebar"][data-agy-sb-state="done"][data-agy-sb-active="1"]::after {
+        content: "当前·完成";
+        color: #ecfdf5;
+        background: #16a34a;
       }
 
       /* 2. Waiting for confirmation - Amber/Orange */
@@ -210,6 +274,16 @@ const BOOTSTRAP_SCRIPT = `(() => {
         color: #fbbf24;
         background: rgba(120, 53, 15, 0.72);
       }
+      [data-testid="conversation-row-sidebar"][data-agy-sb-state="waiting"][data-agy-sb-active="1"] {
+        background-color: rgba(245, 158, 11, 0.25) !important;
+        box-shadow: inset 0 0 0 1.5px rgba(252, 211, 77, 0.92), inset 4px 0 0 0 #f59e0b !important;
+        font-weight: 600 !important;
+      }
+      [data-testid="conversation-row-sidebar"][data-agy-sb-state="waiting"][data-agy-sb-active="1"]::after {
+        content: "当前·询问";
+        color: #fffbeb;
+        background: #d97706;
+      }
 
       /* 3. Running - Cyan/Blue breathing light */
       [data-testid="conversation-row-sidebar"][data-agy-sb-state="running"] {
@@ -224,13 +298,33 @@ const BOOTSTRAP_SCRIPT = `(() => {
         color: #38bdf8;
         background: rgba(12, 74, 110, 0.72);
       }
+      [data-testid="conversation-row-sidebar"][data-agy-sb-state="running"][data-agy-sb-active="1"] {
+        background-color: rgba(56, 189, 248, 0.24) !important;
+        box-shadow: inset 0 0 0 1.5px rgba(125, 211, 252, 0.92), inset 4px 0 0 0 #38bdf8 !important;
+        font-weight: 600 !important;
+      }
+      [data-testid="conversation-row-sidebar"][data-agy-sb-state="running"][data-agy-sb-active="1"]::after {
+        content: "当前·进行中";
+        color: #f0f9ff;
+        background: #0284c7;
+      }
     \`;
     document.head.appendChild(style);
   }
 
   function getActiveConversationId() {
-    const m = location.pathname.match(/^\\/c\\/([^/?#]+)/);
-    return m ? m[1] : null;
+    const m = location.pathname.match(/^\\/(?:c|conversation)\\/([^/?#]+)/);
+    if (m) return m[1];
+    const list = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    if (!list) return null;
+    const activeSelector = '[aria-current="page"], [aria-selected="true"], [data-active="true"], [data-state="active"]';
+    const rows = list.querySelectorAll('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+    for (const row of rows) {
+      if (row.matches(activeSelector) || row.querySelector(activeSelector)) {
+        return row.getAttribute('data-cascade-id');
+      }
+    }
+    return null;
   }
 
   function parseTranslateY(transformStr) {
@@ -268,6 +362,7 @@ const BOOTSTRAP_SCRIPT = `(() => {
     ? prevState.unreadDone
     : loadUnread();
 
+  const initialActiveId = getActiveConversationId();
   const state = {
     version: VERSION,
     prevStatus: prevState?.prevStatus instanceof Map ? prevState.prevStatus : new Map(),
@@ -275,7 +370,18 @@ const BOOTSTRAP_SCRIPT = `(() => {
     clickedTitleIds: new Set(),
     latestItems: new Map(),
     displayState: new Map(),
+    activeConvId: initialActiveId,
+    activeConvEnteredAt: Date.now(),
   };
+
+  function syncActiveConversation() {
+    const nextId = getActiveConversationId();
+    if (nextId !== state.activeConvId) {
+      state.activeConvId = nextId;
+      state.activeConvEnteredAt = Date.now();
+    }
+    return nextId;
+  }
 
   function priorityOf(st) {
     if (st === 'done') return 0;
@@ -284,90 +390,184 @@ const BOOTSTRAP_SCRIPT = `(() => {
     return 3;
   }
 
-  function applyPerProjectLayout() {
-    ensureStyle();
-    const list = document.querySelector('[data-testid="conversation-list-sidebar"]');
-    const inner = list?.firstElementChild;
-    if (!inner) return;
+  let isApplying = false;
+  let observedSidebar = null;
+  let sidebarObserver = null;
+  let mountObserver = null;
+  let rafPending = false;
 
-    // 1. Collect all virtual list wrappers and sync their true React/TanStack origY
-    const entries = [];
-    for (const wrapper of Array.from(inner.children)) {
-      const currentY = parseTranslateY(wrapper.style.transform);
-      const row = wrapper.querySelector('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+  const scheduleLayout = () => {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      applyPerProjectLayout();
+    });
+  };
 
-      if (currentY !== null) {
-        const appliedY = wrapper.dataset.agyAppliedY !== undefined ? Number(wrapper.dataset.agyAppliedY) : null;
-        if (appliedY === null || Math.abs(currentY - appliedY) > 0.5) {
-          // React/TanStack updated this element's position -> record new origY
-          wrapper.dataset.agyOrigY = String(currentY);
-          delete wrapper.dataset.agyAppliedY;
-        }
+  const onSidebarMouseLeave = () => {
+    scheduleLayout();
+  };
+
+  function ensureSidebarObserver(list) {
+    if (!list) {
+      if (observedSidebar) {
+        try { observedSidebar.removeEventListener('mouseleave', onSidebarMouseLeave); } catch {}
+        observedSidebar = null;
       }
-
-      const origY = wrapper.dataset.agyOrigY !== undefined ? Number(wrapper.dataset.agyOrigY) : currentY;
-      const cascadeId = row ? row.getAttribute('data-cascade-id') : null;
-      const isRow = Boolean(row && cascadeId && origY !== null);
-
-      // Update visual highlight attribute on each row
-      if (row && cascadeId) {
-        const st = state.displayState.get(cascadeId);
-        if (st) {
-          if (row.getAttribute('data-agy-sb-state') !== st) {
-            row.setAttribute('data-agy-sb-state', st);
+      if (sidebarObserver) {
+        sidebarObserver.disconnect();
+        sidebarObserver = null;
+      }
+      if (!mountObserver && document.body) {
+        mountObserver = new MutationObserver(() => {
+          const found = document.querySelector('[data-testid="conversation-list-sidebar"]');
+          if (found) {
+            mountObserver.disconnect();
+            mountObserver = null;
+            ensureSidebarObserver(found);
+            scheduleLayout();
           }
-        } else if (row.hasAttribute('data-agy-sb-state')) {
-          row.removeAttribute('data-agy-sb-state');
-        }
+        });
+        mountObserver.observe(document.body, { childList: true, subtree: true });
       }
-
-      entries.push({ wrapper, row, cascadeId, isRow, origY });
+      return;
     }
 
-    // 2. Sort by origY so we strictly partition contiguous conversation blocks per project
-    entries.sort((a, b) => (a.origY ?? -1) - (b.origY ?? -1));
+    if (observedSidebar === list) return;
+    if (observedSidebar) {
+      try { observedSidebar.removeEventListener('mouseleave', onSidebarMouseLeave); } catch {}
+    }
+    if (sidebarObserver) {
+      sidebarObserver.disconnect();
+    }
+    if (mountObserver) {
+      mountObserver.disconnect();
+      mountObserver = null;
+    }
 
-    // 3. Reorder ONLY within each contiguous block of conversation rows (strictly per project)
-    let i = 0;
-    while (i < entries.length) {
-      if (!entries[i].isRow) {
-        i++;
-        continue;
-      }
-      const block = [];
-      while (i < entries.length && entries[i].isRow) {
-        block.push(entries[i]);
-        i++;
-      }
+    observedSidebar = list;
+    list.addEventListener('mouseleave', onSidebarMouseLeave);
+    sidebarObserver = new MutationObserver(() => {
+      if (isApplying) return;
+      scheduleLayout();
+    });
+    sidebarObserver.observe(list, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style', 'aria-current', 'aria-selected', 'data-active', 'data-state'],
+    });
+  }
 
-      // Preserve the exact set of Y slots belonging to this project block
-      const slots = block.map((e) => e.origY);
+  function applyPerProjectLayout() {
+    if (isApplying) return;
+    isApplying = true;
+    try {
+      ensureStyle();
+      const list = document.querySelector('[data-testid="conversation-list-sidebar"]');
+      ensureSidebarObserver(list);
+      const inner = list?.firstElementChild;
+      if (!inner) return;
 
-      // Sort rows within THIS project only: done -> waiting -> running -> normal (original order)
-      const sorted = [...block].sort((a, b) => {
-        const stA = state.displayState.get(a.cascadeId);
-        const stB = state.displayState.get(b.cascadeId);
-        const pA = priorityOf(stA);
-        const pB = priorityOf(stB);
-        if (pA !== pB) return pA - pB;
-        if (stA === 'done' && stB === 'done') {
-          const tA = state.unreadDone.get(a.cascadeId)?.finishedAt || 0;
-          const tB = state.unreadDone.get(b.cascadeId)?.finishedAt || 0;
-          if (tA !== tB) return tB - tA;
+      const activeId = syncActiveConversation();
+      const isHovered = typeof list.matches === 'function' && list.matches(':hover');
+
+      // 1. Collect all virtual list wrappers using React's untouched inline transform translateY
+      const entries = [];
+      for (const wrapper of Array.from(inner.children)) {
+        const origY = parseTranslateY(wrapper.style.transform);
+        const row = wrapper.querySelector('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+        const cascadeId = row ? row.getAttribute('data-cascade-id') : null;
+        const isRow = Boolean(row && cascadeId && origY !== null);
+
+        // Always keep visual state and active conversation indicator up to date (even while hovered)
+        if (row && cascadeId) {
+          const st = state.displayState.get(cascadeId);
+          if (st) {
+            if (row.getAttribute('data-agy-sb-state') !== st) {
+              row.setAttribute('data-agy-sb-state', st);
+            }
+          } else if (row.hasAttribute('data-agy-sb-state')) {
+            row.removeAttribute('data-agy-sb-state');
+          }
+
+          if (activeId && cascadeId === activeId) {
+            if (row.getAttribute('data-agy-sb-active') !== '1') {
+              row.setAttribute('data-agy-sb-active', '1');
+            }
+          } else if (row.hasAttribute('data-agy-sb-active')) {
+            row.removeAttribute('data-agy-sb-active');
+          }
         }
-        return a.origY - b.origY;
-      });
 
-      for (let k = 0; k < sorted.length; k++) {
-        const item = sorted[k];
-        const targetY = slots[k];
-        item.wrapper.dataset.agyManaged = '1';
-        item.wrapper.dataset.agyAppliedY = String(targetY);
-        const targetTransform = 'translateY(' + targetY + 'px)';
-        if (item.wrapper.style.transform !== targetTransform) {
-          item.wrapper.style.transform = targetTransform;
+        entries.push({ wrapper, row, cascadeId, isRow, origY });
+      }
+
+      // Freeze reordering while pointer is hovering the sidebar so rows never jump under cursor
+      if (isHovered) return;
+
+      // 2. Sort by origY so we strictly partition contiguous conversation blocks per project
+      entries.sort((a, b) => (a.origY ?? -1) - (b.origY ?? -1));
+
+      // 3. Reorder ONLY within each contiguous block of conversation rows (also split on large virtual Y gaps)
+      let i = 0;
+      while (i < entries.length) {
+        if (!entries[i].isRow) {
+          i++;
+          continue;
+        }
+        const block = [entries[i]];
+        i++;
+        while (i < entries.length && entries[i].isRow) {
+          const prev = block[block.length - 1];
+          const cur = entries[i];
+          const rowH = prev.wrapper.offsetHeight || cur.wrapper.offsetHeight || 36;
+          const maxStep = Math.max(rowH * 1.45, 56);
+          if ((cur.origY - prev.origY) > maxStep) break;
+          block.push(cur);
+          i++;
+        }
+
+        const slots = block.map((e) => e.origY);
+
+        const sorted = [...block].sort((a, b) => {
+          const stA = state.displayState.get(a.cascadeId);
+          const stB = state.displayState.get(b.cascadeId);
+          const pA = priorityOf(stA);
+          const pB = priorityOf(stB);
+          if (pA !== pB) return pA - pB;
+          if (stA === 'done' && stB === 'done') {
+            const tA = state.unreadDone.get(a.cascadeId)?.finishedAt || 0;
+            const tB = state.unreadDone.get(b.cascadeId)?.finishedAt || 0;
+            if (tA !== tB) return tB - tA;
+          }
+          return a.origY - b.origY;
+        });
+
+        for (let k = 0; k < sorted.length; k++) {
+          const item = sorted[k];
+          const deltaY = slots[k] - item.origY;
+          if (Math.abs(deltaY) < 0.5) {
+            if (item.wrapper.dataset.agyManaged !== undefined) {
+              delete item.wrapper.dataset.agyManaged;
+            }
+            if (item.wrapper.style.getPropertyValue('--agy-dy')) {
+              item.wrapper.style.removeProperty('--agy-dy');
+            }
+          } else {
+            const nextDy = deltaY + 'px';
+            if (item.wrapper.dataset.agyManaged !== '1') {
+              item.wrapper.dataset.agyManaged = '1';
+            }
+            if (item.wrapper.style.getPropertyValue('--agy-dy') !== nextDy) {
+              item.wrapper.style.setProperty('--agy-dy', nextDy);
+            }
+          }
         }
       }
+    } finally {
+      isApplying = false;
     }
   }
 
@@ -394,6 +594,19 @@ const BOOTSTRAP_SCRIPT = `(() => {
     applyPerProjectLayout();
   }
 
+  function tryClearActiveDone() {
+    const activeId = syncActiveConversation();
+    if (!activeId || !state.unreadDone.has(activeId)) return;
+    const clicked = state.clickedTitleIds.has(activeId);
+    const stayedLongEnough = (Date.now() - state.activeConvEnteredAt) >= 300;
+    if (clicked || stayedLongEnough) {
+      state.unreadDone.delete(activeId);
+      state.clickedTitleIds.delete(activeId);
+      saveUnread(state.unreadDone);
+      rebuildDisplayState();
+    }
+  }
+
   const onClick = (ev) => {
     const row = ev.target?.closest?.('[data-testid="conversation-row-sidebar"][data-cascade-id]');
     if (row) {
@@ -401,6 +614,7 @@ const BOOTSTRAP_SCRIPT = `(() => {
       if (id && state.unreadDone.has(id)) {
         state.clickedTitleIds.add(id);
       }
+      scheduleLayout();
       return;
     }
 
@@ -413,31 +627,50 @@ const BOOTSTRAP_SCRIPT = `(() => {
     );
     if (!inDialogOrComposer) return;
 
-    const activeId = getActiveConversationId();
-    if (activeId && state.unreadDone.has(activeId) && state.clickedTitleIds.has(activeId)) {
-      state.unreadDone.delete(activeId);
-      state.clickedTitleIds.delete(activeId);
-      saveUnread(state.unreadDone);
-      rebuildDisplayState();
+    tryClearActiveDone();
+  };
+
+  const onComposerInteract = (ev) => {
+    if (ev.target?.closest?.('[data-testid="conversation-list-sidebar"], nav, aside')) return;
+    if (ev.target?.closest?.('textarea, [contenteditable="true"], [role="textbox"]')) {
+      tryClearActiveDone();
     }
   };
 
-  document.addEventListener('click', onClick, true);
+  const onPopState = () => {
+    scheduleLayout();
+  };
 
-  let rafPending = false;
-  const mo = new MutationObserver(() => {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => {
-      rafPending = false;
-      applyPerProjectLayout();
-    });
-  });
-  mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+  const origPushState = history.pushState.bind(history);
+  const origReplaceState = history.replaceState.bind(history);
+  history.pushState = function (...args) {
+    const ret = origPushState(...args);
+    Promise.resolve().then(scheduleLayout);
+    return ret;
+  };
+  history.replaceState = function (...args) {
+    const ret = origReplaceState(...args);
+    Promise.resolve().then(scheduleLayout);
+    return ret;
+  };
+
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('focusin', onComposerInteract, true);
+  document.addEventListener('keydown', onComposerInteract, true);
+  window.addEventListener('popstate', onPopState);
 
   state.cleanup = () => {
-    mo.disconnect();
+    if (sidebarObserver) sidebarObserver.disconnect();
+    if (mountObserver) mountObserver.disconnect();
+    if (observedSidebar) {
+      try { observedSidebar.removeEventListener('mouseleave', onSidebarMouseLeave); } catch {}
+    }
     document.removeEventListener('click', onClick, true);
+    document.removeEventListener('focusin', onComposerInteract, true);
+    document.removeEventListener('keydown', onComposerInteract, true);
+    window.removeEventListener('popstate', onPopState);
+    history.pushState = origPushState;
+    history.replaceState = origReplaceState;
   };
 
   state.update = (items) => {
@@ -478,6 +711,7 @@ const BOOTSTRAP_SCRIPT = `(() => {
 
   window.__agySidebarPin = state;
   ensureStyle();
+  ensureSidebarObserver(document.querySelector('[data-testid="conversation-list-sidebar"]'));
   return true;
 })();`;
 
@@ -538,7 +772,7 @@ class CdpClient {
     }
     const payload = JSON.stringify(items);
     const res = await this.send('Runtime.evaluate', {
-      expression: `(() => { if (!window.__agySidebarPin || window.__agySidebarPin.version !== 6) return false; window.__agySidebarPin.update(${payload}); return true; })()`,
+      expression: `(() => { if (!window.__agySidebarPin || window.__agySidebarPin.version !== 7) return false; window.__agySidebarPin.update(${payload}); return true; })()`,
       returnByValue: true,
     });
     if (res?.result?.value === false) {
